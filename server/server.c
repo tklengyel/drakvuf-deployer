@@ -108,222 +108,134 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <signal.h>
+#include <poll.h>
 
-#include <libxenvchan.h>
 #include <xenstore.h>
 
 /* Xenstore paths */
-static const char* xs_watcher_path = "/drakvuf-deployer/client-domid";
-static const char* xs_input_path = "/drakvuf-deployer/%i/in";
-static const char* xs_output_path = "/drakvuf-deployer/%i/out";
-
-/* Vchan structs */
-static struct libxenvchan *vchan_in, *vchan_out;
+static const char* xs_base_path = "/drakvuf-deployer";
+static const char* xs_init_path = "/drakvuf-deployer/init";
+static const char* xs_input_path = "/drakvuf-deployer/input";
+static const char* xs_output_path = "/drakvuf-deployer/output";
 
 /* Xenstore handle */
 static struct xs_handle *xs;
 
 /* Threads for encryption/decryption */
-static pthread_t server, watcher;
-
-/* Whether a server is already active */
-static int server_active;
+static pthread_t server;
 
 /* The domain ID we are running in */
 static int my_domid;
 
 /* Interrupt handler */
-static int watcher_interrupted, server_interrupted;
+static int server_interrupted;
 static void close_handler(int sig) {
-	watcher_interrupted = sig;
     server_interrupted = sig;
-}
-
-static inline
-void vchan_finish() {
-	if (vchan_in) {
-		libxenvchan_close(vchan_in);
-        vchan_in = NULL;
-	}
-	if (vchan_out) {
-		libxenvchan_close(vchan_out);
-        vchan_out = NULL;
-	}
-}
-
-/* Initialize channels for encryption and decryption */
-int vchan_init(int peer_domid) {
-
-	int ret = 0;
-
-    char *input_path = malloc(snprintf(NULL, 0, xs_input_path, peer_domid) + 1);
-    memset(input_path,0,snprintf(NULL, 0, xs_input_path, peer_domid)+1);
-    sprintf(input_path, xs_input_path, peer_domid);
-
-    char *output_path = malloc(snprintf(NULL, 0, xs_output_path, peer_domid) + 1);
-    memset(output_path,0,snprintf(NULL, 0, xs_output_path, peer_domid)+1);
-    sprintf(output_path, xs_output_path, peer_domid);
-
-	vchan_in = libxenvchan_server_init(NULL, peer_domid, input_path, 0, 0);
-	vchan_out = libxenvchan_server_init(NULL, peer_domid, xs_output_path, 0, 0);
-
-	if (!vchan_in) {
-		printf("Failed to init input channel for %s\n", input_path);
-		goto done;
-	}
-
-	if (!vchan_out) {
-		printf("Failed to init output channel!\n", output_path);
-		goto done;
-	}
-
-	// Set channel to blocking
-	vchan_in->blocking = 1;
-	vchan_in->server_persist = 1;
-	vchan_out->blocking = 1;
-	vchan_out->server_persist = 1;
-
-	printf("Event channels opened for peer domain %i\n", peer_domid);
-	printf("\tInput port: %u. Output port: %u\n", vchan_in->event_port, vchan_out->event_port);
-
-	// Save the server's domid into Xenstore
-	/*xs_transaction_t th;
-	char *domid_str = malloc(snprintf(NULL, 0, "%i", my_domid) + 1);
-	sprintf(domid_str, "%i", my_domid);
-	if (!xs_write(xs, th, "/vtpm/aes/server_domid", domid_str,
-			strlen(domid_str))) {
-		printf("Failed to save server domid into Xenstore\n");
-		ret = 0;
-	}
-	free(domid_str);*/
-
-    ret = 1;
-
-	done:
-        free(input_path);
-        free(output_path);
-        return ret;
 }
 
 void *server_thread(void *input) {
 
-	int mode = *(int *) input;
-
 	printf("Starting DRAKVUF Deployer Server\n");
-    server_interrupted = 0;
-    server_active = 1;
+
+    xs_transaction_t th;
+    int rc, num_strings, len;
+    char **vec, *buf;
+    struct pollfd fd = { .fd = xs_fileno(xs), .events = POLLIN | POLLERR };
+
+    if ( !xs_watch(xs, xs_input_path, "drakvuf-deployer") )
+        goto done;
 
 	while (!server_interrupted) {
-		unsigned char buffer[32];
-		memset(buffer, 0, 32);
-		int size = 0, sent = 0;
+        rc = poll(&fd, 1, 100);
+        if (rc < 0) {
+            goto done;
+        }
 
-		size = libxenvchan_read(vchan_in, buffer, 32);
-		if (size > 0) {
+        if (rc && fd.revents & POLLIN) {
 
-			while (sent < size) {
-                unsigned char *newtext = "OK";
-				int rc = libxenvchan_write(vchan_out, newtext + sent, size - sent);
-				if (rc > 0) {
-					sent += rc;
-				} else {
-					printf("Error\n");
-					break;
-				}
-			}
-		}
+            vec = xs_read_watch(xs, &num_strings);
+            if (!vec || !num_strings) goto done;
 
+            th = xs_transaction_start(xs);
+            buf = xs_read(xs, th, vec[XS_WATCH_PATH], &len);
+            xs_transaction_end(xs, th, false);
+
+            if ( buf ) {
+                th = xs_transaction_start(xs);
+                xs_rm(xs, th, xs_input_path);
+                xs_transaction_end(xs, th, false);
+
+                printf("Received: %s\n", buf);
+                free(buf);
+            }
+        }
 	}
 
+done:
 	printf("Stopping DRAKVUF Deployer Server\n");
-	vchan_finish();
 	pthread_exit(NULL);
 
 	return NULL;
 }
 
-/* Xenstore poller to create DRAKVUF deployer vchan server
- * This is used to watch for the client domid */
-void* watcher_thread(void* input) {
+int init_xenstore() {
 
-    fd_set set;
-    xs_transaction_t th;
-    unsigned int len, num_strings;
-    struct timeval tv = {.tv_sec = 0, .tv_usec = 0 };
-    char **vec, *buf;
-
-    if ( !xs_watch(xs, xs_watcher_path, "drakvuf-deployer") )
-        goto done;
-
-    int fd = xs_fileno(xs);
-
-    while (!watcher_interrupted) {
-
-        FD_ZERO(&set);
-        FD_SET(fd, &set);
-
-        /* Poll for data. */
-        if ( select(fd + 1, &set, NULL, NULL, &tv) > 0 && FD_ISSET(fd, &set)) {
-            vec = xs_read_watch(xs, &num_strings);
-            if (!vec || !num_strings) goto done;
-
-            if (num_strings == 2)
-            printf("vec contents: %s|%s\n", vec[XS_WATCH_PATH], vec[XS_WATCH_TOKEN]);
-
-            /* Prepare a transaction and do a read. */
-            th = xs_transaction_start(xs);
-            buf = xs_read(xs, th, vec[XS_WATCH_PATH], &len);
-            xs_transaction_end(xs, th, false);
-            if ( buf ) {
-                printf("buflen: %d\nbuf: %s\n", len, buf);
-
-        	    if (!vchan_init(atoi(buf))) {
-		            printf("Couldn't initialize Xen inter-domain communication channel (vchan)\n");
-        	    }
-
-                if (server_active) {
-                    server_interrupted = 1;
-                	pthread_join(server, NULL);
-                }
-
-            	pthread_create(&server, NULL, server_thread, NULL);
-            }
-        }
-    }
-
-    done:
-    	pthread_exit(NULL);
-	    return NULL;
-
-}
-
-void init_my_domid() {
-	xs_transaction_t th;
-
+    int rc = 0;
 	int size = 0;
-	char* id = xs_read(xs, th, "domid", &size);
+	xs_transaction_t th1, th2;
+
+	xs = xs_open(0);
+	if (!xs) {
+		return rc;
+	}
+
+	char* id = xs_read(xs, th1, "domid", &size);
 	if (size <= 0 || !id) {
 		printf("Failed to access xenstore\n");
-		return;
+        return rc;
 	}
 
 	my_domid = atoi(id);
-	free(id);
 
-	printf("My domain ID is %i\n", my_domid);
-}
-
-int xenstore_init() {
-	xs = xs_open(0);
-	if (!xs) {
-		return 0;
+	//Init Xenstore folder
+	if (!xs_write(xs, th2, xs_init_path, id, size)) {
+		printf("Failed to init Xenstore folder\n");
+        goto done;
 	}
 
-	return 1;
+    rc = 1;
+	printf("My domain ID is %i\n", my_domid);
+
+    xs_transaction_t t;
+    struct xs_permissions perms[1];
+
+    perms[0].id = my_domid;
+    perms[0].perms = XS_PERM_READ|XS_PERM_WRITE;
+
+    if ( !xs_set_permissions(xs, t, xs_base_path, perms, 1) ) {
+        printf("Failed to set read/write permissions on %s\n", xs_base_path);
+        goto done;
+    }
+
+    if ( !xs_set_permissions(xs, t, xs_init_path, perms, 1) ) {
+        printf("Failed to set read/write permissions on %s\n", xs_init_path);
+        goto done;
+    }
+
+    printf("Permissions set on %s\n", xs_base_path);
+
+done:
+    free(id);
+    return 1;
 }
 
 void xenstore_close() {
 	if (xs) {
+
+        xs_transaction_t th = xs_transaction_start(xs);
+        xs_rm(xs, th, xs_base_path);
+        xs_transaction_end(xs, th, false);
+
 		xs_close(xs);
 		xs = NULL;
 	}
@@ -332,20 +244,13 @@ void xenstore_close() {
 int main(int argc, char **argv) {
 
 	int ret = 0;
-    server_active = 0;
 	server_interrupted = 0;
-    watcher_interrupted = 0;
 
-    vchan_in = NULL;
-    vchan_out = NULL;
-
-	if (!xenstore_init()) {
+	if (!init_xenstore()) {
 		printf("Failed to open Xenstore!\n");
 		ret = -1;
 		goto done;
 	}
-
-	init_my_domid();
 
 	/* for a clean exit */
 	struct sigaction act;
@@ -357,11 +262,8 @@ int main(int argc, char **argv) {
 	sigaction(SIGINT, &act, NULL);
 	sigaction(SIGALRM, &act, NULL);
 
-	pthread_create(&watcher, NULL, watcher_thread, NULL);
-	pthread_join(watcher, NULL);
-
-    if (server_active)
-        pthread_join(server, NULL);
+	pthread_create(&server, NULL, server_thread, NULL);
+	pthread_join(server, NULL);
 
 	xenstore_close();
 
