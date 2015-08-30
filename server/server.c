@@ -118,22 +118,21 @@ static const char* xs_init_path = "/drakvuf-deployer/init";
 static const char* xs_input_path = "/drakvuf-deployer/input";
 static const char* xs_output_path = "/drakvuf-deployer/output";
 
+static const char* reset = "reset";
+
 /* Xenstore handle */
 static struct xs_handle *xs;
-
-/* Threads for encryption/decryption */
-static pthread_t server;
 
 /* The domain ID we are running in */
 static int my_domid;
 
 /* Interrupt handler */
-static int server_interrupted;
+static int interrupted;
 static void close_handler(int sig) {
-    server_interrupted = sig;
+    interrupted = sig;
 }
 
-void *server_thread(void *input) {
+void server() {
 
 	printf("Starting DRAKVUF Deployer Server\n");
 
@@ -145,8 +144,9 @@ void *server_thread(void *input) {
     if ( !xs_watch(xs, xs_input_path, "drakvuf-deployer") )
         goto done;
 
-	while (!server_interrupted) {
-        rc = poll(&fd, 1, 100);
+	while (!interrupted) {
+
+        rc = poll(&fd, 1, 1000);
         if (rc < 0) {
             goto done;
         }
@@ -157,15 +157,27 @@ void *server_thread(void *input) {
             if (!vec || !num_strings) goto done;
 
             th = xs_transaction_start(xs);
-            buf = xs_read(xs, th, vec[XS_WATCH_PATH], &len);
+            buf = xs_read(xs, th, xs_input_path, &len);
             xs_transaction_end(xs, th, false);
 
             if ( buf ) {
-                th = xs_transaction_start(xs);
-                xs_rm(xs, th, xs_input_path);
-                xs_transaction_end(xs, th, false);
 
                 printf("Received: %s\n", buf);
+
+                if(!strncmp(buf, reset, strlen(reset))) {
+
+                    // DO RESET
+
+                    const char *test = "test";
+                    th = xs_transaction_start(xs);
+	                rc = xs_write(xs, th, xs_output_path, test, strlen(test));
+                    xs_transaction_end(xs, th, false);
+                }
+
+                th = xs_transaction_start(xs);
+                rc = xs_rm(xs, th, xs_input_path);
+                xs_transaction_end(xs, th, false);
+
                 free(buf);
             }
         }
@@ -173,24 +185,21 @@ void *server_thread(void *input) {
 
 done:
 	printf("Stopping DRAKVUF Deployer Server\n");
-	pthread_exit(NULL);
-
-	return NULL;
 }
 
 int init_xenstore() {
 
     int rc = 0;
 	int size = 0;
-	xs_transaction_t th1, th2;
+	xs_transaction_t th;
 
 	xs = xs_open(0);
 	if (!xs) {
 		return rc;
 	}
 
-	char* id = xs_read(xs, th1, "domid", &size);
-	if (size <= 0 || !id) {
+	char* id = xs_read(xs, th, "domid", &size);
+	if (!id) {
 		printf("Failed to access xenstore\n");
         return rc;
 	}
@@ -198,7 +207,11 @@ int init_xenstore() {
 	my_domid = atoi(id);
 
 	//Init Xenstore folder
-	if (!xs_write(xs, th2, xs_init_path, id, size)) {
+    th = xs_transaction_start(xs);
+	rc = xs_write(xs, th, xs_init_path, id, size);
+    xs_transaction_end(xs, th, false);
+
+    if(!rc) {
 		printf("Failed to init Xenstore folder\n");
         goto done;
 	}
@@ -206,18 +219,25 @@ int init_xenstore() {
     rc = 1;
 	printf("My domain ID is %i\n", my_domid);
 
-    xs_transaction_t t;
     struct xs_permissions perms[1];
 
     perms[0].id = my_domid;
     perms[0].perms = XS_PERM_READ|XS_PERM_WRITE;
 
-    if ( !xs_set_permissions(xs, t, xs_base_path, perms, 1) ) {
+    th = xs_transaction_start(xs);
+    rc = xs_set_permissions(xs, th, xs_base_path, perms, 1);
+    xs_transaction_end(xs, th, false);
+
+    if (!rc) {
         printf("Failed to set read/write permissions on %s\n", xs_base_path);
         goto done;
     }
 
-    if ( !xs_set_permissions(xs, t, xs_init_path, perms, 1) ) {
+    th = xs_transaction_start(xs);
+    rc = xs_set_permissions(xs, th, xs_init_path, perms, 1);
+    xs_transaction_end(xs, th, false);
+
+    if (!rc) {
         printf("Failed to set read/write permissions on %s\n", xs_init_path);
         goto done;
     }
@@ -244,13 +264,7 @@ void xenstore_close() {
 int main(int argc, char **argv) {
 
 	int ret = 0;
-	server_interrupted = 0;
-
-	if (!init_xenstore()) {
-		printf("Failed to open Xenstore!\n");
-		ret = -1;
-		goto done;
-	}
+	interrupted = 0;
 
 	/* for a clean exit */
 	struct sigaction act;
@@ -262,8 +276,13 @@ int main(int argc, char **argv) {
 	sigaction(SIGINT, &act, NULL);
 	sigaction(SIGALRM, &act, NULL);
 
-	pthread_create(&server, NULL, server_thread, NULL);
-	pthread_join(server, NULL);
+	if (!init_xenstore()) {
+		printf("Failed to open Xenstore!\n");
+		ret = -1;
+		goto done;
+	}
+
+    server();
 
 	xenstore_close();
 
