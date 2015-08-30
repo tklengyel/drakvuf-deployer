@@ -210,7 +210,7 @@ int init_vchan() {
 
 int main(int argc, char **argv) {
 
-	unsigned int rc = 0;
+	int rc = 0;
 	/* for a clean exit */
 	struct sigaction act;
 	act.sa_handler = close_handler;
@@ -235,43 +235,25 @@ int main(int argc, char **argv) {
 		goto done;
 	}
 
-	while (!interrupted) {
-		char string[1024];
-
-		printf("Enter string for encryption:\n");
-
-		fgets(string, 1024, stdin);
-		if (interrupted)
-			break;
-
-		char encrypted[4096], decrypted[4096];
-		unsigned char *newtext = NULL;
-		size_t size = strlen(string);
-		string[size - 1] = '\0';
-		size_t sent = 0;
-
-		printf("Sending '%s' for encryption\n", string);
-		while (sent < size) {
-			int rc = libxenvchan_write(vchan_out, string + sent, size - sent);
-			if (rc > 0) {
-				sent += rc;
-			} else {
-				printf("Error\n");
-				break;
-			}
-		}
-
-		size_t size_read = libxenvchan_read(vchan_in, encrypted, 4096);
-		if (size_read > 0) {
-			printf("\tEncrypted string: '%s'\n", encrypted);
-		} else {
-			printf("Failed to receive encrypted string\n");
-			continue;
-		}
+	rc = libxenvchan_write(vchan_out, "reset", 5);
+	if (rc > 0) {
+        printf ("sent %u bytes\n", rc);
+	} else {
+	    printf("Error\n");
+        goto done;
 	}
 
-	done: vchan_finish();
-	xs_close(xs);
+    char domains[4096];
+    memset(domains, 0, 4096);
+    size_t size_read = libxenvchan_read(vchan_in, domains, 4096);
+    if (size_read > 0) {
+        printf("Received: %s\n", domains);
+	} else {
+        printf("Failed to receive encrypted string\n");
+    }
 
-	return 0;
+    done: vchan_finish();
+    xs_close(xs);
+
+    return 0;
 }
