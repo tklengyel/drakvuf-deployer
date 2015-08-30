@@ -246,11 +246,7 @@ int main(int argc, char **argv) {
     if (!buf) {
         pthread_mutex_init(&mutex, NULL);
         pthread_mutex_lock(&mutex);
-        pthread_attr_t tattr;
-        pthread_attr_init(&tattr);
-        pthread_attr_setdetachstate(&tattr,PTHREAD_CREATE_DETACHED);
-        pthread_create(&client, &tattr, client_thread, NULL);
-        pthread_attr_destroy(&tattr);
+        pthread_create(&client, NULL, client_thread, NULL);
 
         th = xs_transaction_start(xs);
         rc = xs_write(xs, th, xs_input_path, reset, strlen(reset));
@@ -262,6 +258,8 @@ int main(int argc, char **argv) {
             printf("Failed to send reset signal\n");
             goto done;
         }
+
+        pthread_join(client,NULL);
 
     } else {
         th = xs_transaction_start(xs);
