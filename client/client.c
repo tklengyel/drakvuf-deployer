@@ -147,35 +147,32 @@ void* client_thread(void* input) {
 
     pthread_mutex_unlock(&mutex);
 
-    if (!xs_watch(xs, xs_output_path, "drakvuf-deployer") )
-        goto done;
+    while (!interrupted) {
+        // For some reason polling on xenstore doesn't work in the client
+        // xs_read_watch would get stuck and hang the process
+        // so we just sleep-loop waiting for the result
+        th = xs_transaction_start(xs);
+        buf = xs_read(xs, th, xs_output_path, &len);
+        xs_transaction_end(xs, th, false);
 
-    while (!buf && !interrupted) {
-        rc = poll(&fd, 1, 100);
-        if (rc < 0)
-            goto done;
-
-        if (rc && fd.revents & POLLIN) {
-
-            vec = xs_read_watch(xs, &num_strings);
-            if (!vec || !num_strings)
-                goto done;
-
-            th = xs_transaction_start(xs);
-            buf = xs_read(xs, th, xs_output_path, &len);
-            xs_transaction_end(xs, th, false);
-        }
+        if (buf)
+            break;
+        else
+            sleep(1);
     }
 
-    th = xs_transaction_start(xs);
-    xs_rm(xs, th, xs_output_path);
-    xs_transaction_end(xs, th, false);
+    if (buf) {
+        th = xs_transaction_start(xs);
+        xs_rm(xs, th, xs_output_path);
+        xs_transaction_end(xs, th, false);
 
-    received_reset_result(buf);
-    free(buf);
+        received_reset_result(buf);
+        free(buf);
+    }
 
 done:
     pthread_exit(NULL);
+    return NULL;
 }
 
 int init_xenstore() {
