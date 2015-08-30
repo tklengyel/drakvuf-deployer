@@ -131,6 +131,10 @@ static void close_handler(int sig) {
 	interrupted = sig;
 }
 
+void received_reset_result(char *result) {
+    printf("Reset result: %s\n", result);
+}
+
 void* client_thread(void* input) {
     xs_transaction_t th;
     int rc, num_strings, len;
@@ -143,11 +147,7 @@ void* client_thread(void* input) {
 
     pthread_mutex_unlock(&mutex);
 
-    th = xs_transaction_start(xs);
-    buf = xs_read(xs, th, xs_output_path, &len);
-    xs_transaction_end(xs, th, false);
-
-    if (!buf && !xs_watch(xs, xs_output_path, "drakvuf-deployer") )
+    if (!xs_watch(xs, xs_output_path, "drakvuf-deployer") )
         goto done;
 
     while (!buf && !interrupted) {
@@ -171,7 +171,7 @@ void* client_thread(void* input) {
     xs_rm(xs, th, xs_output_path);
     xs_transaction_end(xs, th, false);
 
-    printf("Received: %s\n", buf);
+    received_reset_result(buf);
     free(buf);
 
 done:
@@ -221,7 +221,7 @@ done:
 
 int main(int argc, char **argv) {
 
-	int rc = 0;
+	int rc = 0, len;
 	xs_transaction_t th;
 
     interrupted = 0;
@@ -236,28 +236,42 @@ int main(int argc, char **argv) {
     sigaction(SIGINT, &act, NULL);
     sigaction(SIGALRM, &act, NULL);
 
-    pthread_mutex_init(&mutex, NULL);
-    pthread_mutex_lock(&mutex);
-
     if(!init_xenstore())
         goto done;
 
-    pthread_create(&client, NULL, client_thread, NULL);
-
     th = xs_transaction_start(xs);
-    rc = xs_write(xs, th, xs_input_path, reset, strlen(reset));
+    char *buf = xs_read(xs, th, xs_output_path, &len);
     xs_transaction_end(xs, th, false);
 
-    pthread_mutex_unlock(&mutex);
+    if (!buf) {
+        pthread_mutex_init(&mutex, NULL);
+        pthread_mutex_lock(&mutex);
+        pthread_attr_t tattr;
+        pthread_attr_init(&tattr);
+        pthread_attr_setdetachstate(&tattr,PTHREAD_CREATE_DETACHED);
+        pthread_create(&client, &tattr, client_thread, NULL);
+        pthread_attr_destroy(&tattr);
 
-    if (!rc) {
-        printf("Failed to send reset signal\n");
-        goto done;
+        th = xs_transaction_start(xs);
+        rc = xs_write(xs, th, xs_input_path, reset, strlen(reset));
+        xs_transaction_end(xs, th, false);
+
+        pthread_mutex_unlock(&mutex);
+
+        if (!rc) {
+            printf("Failed to send reset signal\n");
+            goto done;
+        }
+
+    } else {
+        th = xs_transaction_start(xs);
+        xs_rm(xs, th, xs_output_path);
+        xs_transaction_end(xs, th, false);
+        received_reset_result(buf);
     }
 
-    pthread_join(client, NULL);
-
     done:
+    interrupted = 1;
     pthread_mutex_destroy(&mutex);
     xs_close(xs);
 
