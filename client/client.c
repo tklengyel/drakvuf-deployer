@@ -150,7 +150,7 @@ void* client_thread(void* input) {
     if (!buf && !xs_watch(xs, xs_output_path, "drakvuf-deployer") )
         goto done;
 
-    while (!buf) {
+    while (!buf && !interrupted) {
         rc = poll(&fd, 1, 100);
         if (rc < 0)
             goto done;
@@ -223,6 +223,19 @@ int main(int argc, char **argv) {
 
 	int rc = 0;
 	xs_transaction_t th;
+
+    interrupted = 0;
+
+    /* for a clean exit */
+    struct sigaction act;
+    act.sa_handler = close_handler;
+    act.sa_flags = 0;
+    sigemptyset(&act.sa_mask);
+    sigaction(SIGHUP, &act, NULL);
+    sigaction(SIGTERM, &act, NULL);
+    sigaction(SIGINT, &act, NULL);
+    sigaction(SIGALRM, &act, NULL);
+
     pthread_mutex_init(&mutex, NULL);
     pthread_mutex_lock(&mutex);
 

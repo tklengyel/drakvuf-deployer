@@ -219,6 +219,11 @@ int init_xenstore() {
     rc = 1;
 	printf("My domain ID is %i\n", my_domid);
 
+    if(!my_domid) {
+        printf("Server needs to run in dom0\n");
+        return rc;
+    }
+
     struct xs_permissions perms[1];
 
     perms[0].id = my_domid;
@@ -278,7 +283,7 @@ int main(int argc, char **argv) {
 
 	if (!init_xenstore()) {
 		printf("Failed to open Xenstore!\n");
-		ret = -1;
+		ret = 1;
 		goto done;
 	}
 
