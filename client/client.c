@@ -108,17 +108,22 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+#include <poll.h>
+#include <pthread.h>
 
-#include <libxenvchan.h>
 #include <xenstore.h>
 
-static const char* xs_watcher_path = "/drakvuf-deployer/client-domid";
-static const char* xs_input_path = "/drakvuf-deployer/%i/in"; // server's input, our output
-static const char* xs_output_path = "/drakvuf-deployer/%i/out"; // server's output, our input
+static const char* xs_base_path = "/drakvuf-deployer";
+static const char* xs_init_path = "/drakvuf-deployer/init";
+static const char* xs_input_path = "/drakvuf-deployer/input";
+static const char* xs_output_path = "/drakvuf-deployer/output";
+
+static const char* reset = "reset";
+static pthread_t client;
+pthread_mutex_t mutex;
 
 static struct xs_handle *xs;
 static int my_domid;
-static struct libxenvchan *vchan_out, *vchan_in;
 
 /* Interrupt handler */
 static int interrupted;
@@ -126,24 +131,68 @@ static void close_handler(int sig) {
 	interrupted = sig;
 }
 
-static inline
-void vchan_finish() {
-	if (vchan_in) {
-		libxenvchan_close(vchan_in);
-        vchan_in = NULL;
-	}
-	if (vchan_out) {
-		libxenvchan_close(vchan_out);
-        vchan_out = NULL;
-	}
+void* client_thread(void* input) {
+    xs_transaction_t th;
+    int rc, num_strings, len;
+    char **vec, *buf = NULL;
+    struct pollfd fd = { .fd = xs_fileno(xs), .events = POLLIN | POLLERR };
+
+    while (pthread_mutex_trylock(&mutex)) {
+        sleep(1);
+    }
+
+    pthread_mutex_unlock(&mutex);
+
+    th = xs_transaction_start(xs);
+    buf = xs_read(xs, th, xs_output_path, &len);
+    xs_transaction_end(xs, th, false);
+
+    if (!buf && !xs_watch(xs, xs_output_path, "drakvuf-deployer") )
+        goto done;
+
+    while (!buf) {
+        rc = poll(&fd, 1, 100);
+        if (rc < 0)
+            goto done;
+
+        if (rc && fd.revents & POLLIN) {
+
+            vec = xs_read_watch(xs, &num_strings);
+            if (!vec || !num_strings)
+                goto done;
+
+            th = xs_transaction_start(xs);
+            buf = xs_read(xs, th, xs_output_path, &len);
+            xs_transaction_end(xs, th, false);
+        }
+    }
+
+    th = xs_transaction_start(xs);
+    xs_rm(xs, th, xs_output_path);
+    xs_transaction_end(xs, th, false);
+
+    printf("Received: %s\n", buf);
+    free(buf);
+
+done:
+    pthread_exit(NULL);
 }
 
-int init_my_domid() {
+int init_xenstore() {
 	xs_transaction_t th;
-
     int rc = 0;
 	int size1 = 0, size2=0;
+
+	xs = xs_open(0);
+	if (!xs) {
+		printf("Failed to open Xenstore!\n");
+		goto done;
+	}
+
+    th = xs_transaction_start(xs);
 	char* id = xs_read(xs, th, "domid", &size1);
+    xs_transaction_end(xs, th, false);
+
 	if (size1 <= 0 || !id) {
 		printf("Failed to access xenstore\n");
 		goto done;
@@ -153,106 +202,50 @@ int init_my_domid() {
 
 	printf("My domain ID is %i\n", my_domid);
 
-    char* watcher_id = xs_read(xs, th, xs_watcher_path, &size2);
-    if (size2 <= 0 || !watcher_id) {
-        printf("Failed to access xenstore\n");
+    th = xs_transaction_start(xs);
+    char* init = xs_read(xs, th, xs_init_path, &size2);
+    xs_transaction_end(xs, th, false);
+
+    if (!init) {
+        printf("Failed to access xenstore for drakvuf init path\n");
         goto done;
     }
 
-    if (atoi(watcher_id) != my_domid) {
-        // Save the new (this) domid into Xenstore
-        xs_transaction_t th;
-        if (!xs_write(xs, th, xs_watcher_path, id, size1)) {
-            printf("Failed to save client domid into Xenstore\n");
-        }
-    } else {
-        printf("Server vchan is already setup\n");
-    }
+    rc = 1;
 
-    done:
-        free(id);
-        free(watcher_id);
-        return rc;
-}
-
-int init_vchan() {
-	int rc = 0, size = 0;
-
-	char *input_path = malloc(snprintf(NULL, 0, xs_output_path, my_domid)+1);
-    memset(input_path,0,snprintf(NULL, 0, xs_output_path, my_domid)+1);
-	sprintf(input_path, xs_output_path, my_domid);
-	vchan_in = libxenvchan_client_init(NULL, 0, input_path);
-	free(input_path);
-
-	char *output_path = malloc(snprintf(NULL, 0, xs_input_path, my_domid) + 1);
-    memset(output_path,0,snprintf(NULL, 0, xs_input_path, my_domid)+1);
-	sprintf(output_path, xs_input_path, my_domid);
-	vchan_out = libxenvchan_client_init(NULL, 0, output_path);
-	free(output_path);
-
-	if (!vchan_in) {
-		printf("Failed to init input channel!\n");
-		goto done;
-	}
-
-	if (!vchan_out) {
-		printf("Failed to init encryption channel!\n");
-		goto done;
-	}
-
-	vchan_in->blocking = 1;
-	vchan_out->blocking = 1;
-
-	rc = 1;
-
-	done: return rc;
+done:
+    free(id);
+    free(init);
+    return rc;
 }
 
 int main(int argc, char **argv) {
 
 	int rc = 0;
-	/* for a clean exit */
-	struct sigaction act;
-	act.sa_handler = close_handler;
-	act.sa_flags = 0;
-	sigemptyset(&act.sa_mask);
-	sigaction(SIGHUP, &act, NULL);
-	sigaction(SIGTERM, &act, NULL);
-	sigaction(SIGINT, &act, NULL);
-	sigaction(SIGALRM, &act, NULL);
+	xs_transaction_t th;
+    pthread_mutex_init(&mutex, NULL);
+    pthread_mutex_lock(&mutex);
 
-	xs = xs_open(0);
-	if (!xs) {
-		printf("Failed to open Xenstore!\n");
-		goto done;
-	}
-
-	if (!init_my_domid()) {
-		goto done;
-	}
-
-	if (!init_vchan()) {
-		goto done;
-	}
-
-	rc = libxenvchan_write(vchan_out, "reset", 5);
-	if (rc > 0) {
-        printf ("sent %u bytes\n", rc);
-	} else {
-	    printf("Error\n");
+    if(!init_xenstore())
         goto done;
-	}
 
-    char domains[4096];
-    memset(domains, 0, 4096);
-    size_t size_read = libxenvchan_read(vchan_in, domains, 4096);
-    if (size_read > 0) {
-        printf("Received: %s\n", domains);
-	} else {
-        printf("Failed to receive encrypted string\n");
+    pthread_create(&client, NULL, client_thread, NULL);
+
+    th = xs_transaction_start(xs);
+    rc = xs_write(xs, th, xs_input_path, reset, strlen(reset));
+    xs_transaction_end(xs, th, false);
+
+    pthread_mutex_unlock(&mutex);
+
+    if (!rc) {
+        printf("Failed to send reset signal\n");
+        goto done;
     }
 
-    done: vchan_finish();
+    pthread_join(client, NULL);
+
+    done:
+    pthread_mutex_destroy(&mutex);
     xs_close(xs);
 
     return 0;
