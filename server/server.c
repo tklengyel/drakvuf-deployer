@@ -274,11 +274,12 @@ void xenstore_close() {
 
 int main(int argc, char **argv) {
 
-	int ret = 0;
+	int ret = 1;
 	interrupted = 0;
 
     if (argc<2) {
         printf("%s <reset script>\n", argv[0]);
+        goto done;
     }
 
     reset_script = argv[1];
@@ -302,6 +303,7 @@ int main(int argc, char **argv) {
     server();
 
 	xenstore_close();
+    ret = 0;
 
 	done: return ret;
 }
