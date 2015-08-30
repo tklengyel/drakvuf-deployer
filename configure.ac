@@ -116,12 +116,10 @@ AC_PROG_CC_STDC
 AC_CHECK_HEADER(pthread.h, [], [AC_MSG_ERROR([pthread header missing!])])
 AC_CHECK_LIB(pthread, [pthread_create], [], [AC_MSG_ERROR([pthread library is not functional!])])
 
-AC_CHECK_HEADERS(
-	[libxenvchan.h xenctrl.h xenstore.h],
-	[], [AC_MSG_ERROR([Xen header(s) missing!])])
+PKG_CHECK_MODULES([GLIB], [glib-2.0 >= 2.28], [], [AC_ERROR([glib-2.0 (version 2.28+) has to be installed!])])
+AC_CHECK_LIB(glib-2.0, [g_malloc0, g_tree_lookup], [], [AC_ERROR([glib-2.0 library is not functional!])])
 
-AC_CHECK_LIB(xenvchan, [libxenvchan_server_init], [], [AC_MSG_ERROR([libxenvchan library is not functional!])])
-AC_CHECK_LIB(xenctrl, [xc_interface_open], [], [AC_MSG_ERROR([xenctrl library is not functional!])])
+AC_CHECK_HEADERS(xenstore.h,[], [AC_MSG_ERROR([xenstore header missing!])])
 AC_CHECK_LIB(xenstore, [xs_transaction_start], [], [AC_ERROR([xenstore library is not functional!])])
 
 AC_CONFIG_FILES(Makefile server/Makefile client/Makefile)

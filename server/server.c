@@ -110,6 +110,7 @@
 #include <signal.h>
 #include <poll.h>
 
+#include <glib.h>
 #include <xenstore.h>
 
 /* Xenstore paths */
@@ -119,6 +120,7 @@ static const char* xs_input_path = "/drakvuf-deployer/input";
 static const char* xs_output_path = "/drakvuf-deployer/output";
 
 static const char* reset = "reset";
+static char* reset_script;
 
 /* Xenstore handle */
 static struct xs_handle *xs;
@@ -167,10 +169,14 @@ void server() {
                 if(!strncmp(buf, reset, strlen(reset))) {
 
                     // DO RESET
+                    printf("** RUNNING RESET: %s\n", reset_script);
+                    char *output;
+                    int exit_status;
+                    g_spawn_command_line_sync(reset_script, &output, NULL, &exit_status, NULL);
+                    printf("** FINISHED RESET: %s\n", output);
 
-                    const char *test = "test";
                     th = xs_transaction_start(xs);
-	                rc = xs_write(xs, th, xs_output_path, test, strlen(test));
+	                rc = xs_write(xs, th, xs_output_path, output, strlen(output));
                     xs_transaction_end(xs, th, false);
                 }
 
@@ -219,7 +225,7 @@ int init_xenstore() {
     rc = 1;
 	printf("My domain ID is %i\n", my_domid);
 
-    if(!my_domid) {
+    if(my_domid) {
         printf("Server needs to run in dom0\n");
         return rc;
     }
@@ -270,6 +276,12 @@ int main(int argc, char **argv) {
 
 	int ret = 0;
 	interrupted = 0;
+
+    if (argc<2) {
+        printf("%s <reset script>\n", argv[0]);
+    }
+
+    reset_script = argv[1];
 
 	/* for a clean exit */
 	struct sigaction act;
