@@ -119,7 +119,8 @@ static const char* xs_init_path = "/drakvuf-deployer/init";
 static const char* xs_input_path = "/drakvuf-deployer/input";
 static const char* xs_output_path = "/drakvuf-deployer/output";
 
-static const char* reset = "reset";
+static const char* reset_32 = "reset_32";
+static const char* reset_64 = "reset_64";
 static char* reset_script;
 
 /* Xenstore handle */
@@ -165,20 +166,28 @@ void server() {
             if ( buf ) {
 
                 printf("Received: %s\n", buf);
+                char * command = NULL;
 
-                if(!strncmp(buf, reset, strlen(reset))) {
-
-                    // DO RESET
-                    printf("** RUNNING RESET: %s\n", reset_script);
-                    char *output;
-                    int exit_status;
-                    g_spawn_command_line_sync(reset_script, &output, NULL, &exit_status, NULL);
-                    printf("** FINISHED RESET: %s\n", output);
-
-                    th = xs_transaction_start(xs);
-	                rc = xs_write(xs, th, xs_output_path, output, strlen(output));
-                    xs_transaction_end(xs, th, false);
+                if(!strncmp(buf, reset_32, strlen(reset_32))) {
+                    command = g_malloc0(snprintf(NULL, 0, "%s windows7_sp1_x86", reset_script) + 1);
+                    sprintf(command, "%s windows7_sp1_x86", reset_script);
+                } else {
+                    command = g_malloc0(snprintf(NULL, 0, "%s windows7_sp1_x64", reset_script) + 1);
+                    sprintf(command, "%s windows7_sp1_x64", reset_script);
                 }
+
+                // DO RESET
+                printf("** RUNNING RESET: %s\n", command);
+                char *output;
+                int exit_status;
+                g_spawn_command_line_sync(command, &output, NULL, &exit_status, NULL);
+                printf("** FINISHED RESET: %s\n", output);
+
+                free(command);
+
+                th = xs_transaction_start(xs);
+	            rc = xs_write(xs, th, xs_output_path, output, strlen(output));
+                xs_transaction_end(xs, th, false);
 
                 th = xs_transaction_start(xs);
                 rc = xs_rm(xs, th, xs_input_path);

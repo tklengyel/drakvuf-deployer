@@ -118,7 +118,8 @@ static const char* xs_init_path = "/drakvuf-deployer/init";
 static const char* xs_input_path = "/drakvuf-deployer/input";
 static const char* xs_output_path = "/drakvuf-deployer/output";
 
-static const char* reset = "reset";
+static const char* reset_32 = "reset_32";
+static const char* reset_64 = "reset_64";
 static pthread_t client;
 pthread_mutex_t mutex;
 
@@ -221,6 +222,11 @@ int main(int argc, char **argv) {
 	int rc = 0, len;
 	xs_transaction_t th;
 
+    if(argc != 2) {
+        printf("Usage: %s [32|64]\n", argv[0]);
+        return 1;
+    }
+
     interrupted = 0;
 
     /* for a clean exit */
@@ -246,7 +252,11 @@ int main(int argc, char **argv) {
         pthread_create(&client, NULL, client_thread, NULL);
 
         th = xs_transaction_start(xs);
-        rc = xs_write(xs, th, xs_input_path, reset, strlen(reset));
+        if(atoi(argv[1]) == 32) {
+            rc = xs_write(xs, th, xs_input_path, reset_32, strlen(reset_32));
+        } else {
+            rc = xs_write(xs, th, xs_input_path, reset_64, strlen(reset_64));
+        }
         xs_transaction_end(xs, th, false);
 
         pthread_mutex_unlock(&mutex);
