@@ -111,6 +111,7 @@
 #include <poll.h>
 #include <pthread.h>
 
+#include <glib.h>
 #include <xenstore.h>
 
 static const char* xs_base_path = "/drakvuf-deployer";
@@ -118,7 +119,7 @@ static const char* xs_init_path = "/drakvuf-deployer/init";
 static const char* xs_input_path = "/drakvuf-deployer/input";
 static const char* xs_output_path = "/drakvuf-deployer/output";
 
-static const char* reset = "reset";
+static char *reset;
 static pthread_t client;
 pthread_mutex_t mutex;
 
@@ -132,7 +133,7 @@ static void close_handler(int sig) {
 }
 
 void received_reset_result(char *result) {
-    printf("Reset result: %s\n", result);
+    printf("%s", result);
 }
 
 void* client_thread(void* input) {
@@ -140,6 +141,9 @@ void* client_thread(void* input) {
     int rc, num_strings, len;
     char **vec, *buf = NULL;
     struct pollfd fd = { .fd = xs_fileno(xs), .events = POLLIN | POLLERR };
+
+    char *cmd = (char*)g_malloc0(snprintf(NULL, 0, "%s/%s", xs_output_path, reset) + 1);
+    sprintf(cmd, "%s/%s", xs_output_path, reset);
 
     while (pthread_mutex_trylock(&mutex)) {
         sleep(1);
@@ -151,8 +155,9 @@ void* client_thread(void* input) {
         // For some reason polling on xenstore doesn't work in the client
         // xs_read_watch would get stuck and hang the process
         // so we just sleep-loop waiting for the result
+
         th = xs_transaction_start(xs);
-        buf = xs_read(xs, th, xs_output_path, &len);
+        buf = xs_read(xs, th, cmd, &len);
         xs_transaction_end(xs, th, false);
 
         if (buf)
@@ -163,11 +168,12 @@ void* client_thread(void* input) {
 
     if (buf) {
         th = xs_transaction_start(xs);
-        xs_rm(xs, th, xs_output_path);
+        xs_rm(xs, th, cmd);
         xs_transaction_end(xs, th, false);
 
         received_reset_result(buf);
         free(buf);
+        g_free(cmd);
     }
 
 done:
@@ -178,7 +184,7 @@ done:
 int init_xenstore() {
 	xs_transaction_t th;
     int rc = 0;
-	int size1 = 0, size2=0;
+	int size;
 
 	xs = xs_open(0);
 	if (!xs) {
@@ -187,20 +193,7 @@ int init_xenstore() {
 	}
 
     th = xs_transaction_start(xs);
-	char* id = xs_read(xs, th, "domid", &size1);
-    xs_transaction_end(xs, th, false);
-
-	if (size1 <= 0 || !id) {
-		printf("Failed to access xenstore\n");
-		goto done;
-	}
-
-	my_domid = atoi(id);
-
-	printf("My domain ID is %i\n", my_domid);
-
-    th = xs_transaction_start(xs);
-    char* init = xs_read(xs, th, xs_init_path, &size2);
+    char* init = xs_read(xs, th, xs_init_path, &size);
     xs_transaction_end(xs, th, false);
 
     if (!init) {
@@ -211,7 +204,6 @@ int init_xenstore() {
     rc = 1;
 
 done:
-    free(id);
     free(init);
     return rc;
 }
@@ -220,7 +212,12 @@ int main(int argc, char **argv) {
 
 	int rc = 0, len;
 	xs_transaction_t th;
+    char *cmd;
 
+    if ( argc != 2 )
+        return 1;
+
+    reset = argv[1];
     interrupted = 0;
 
     /* for a clean exit */
@@ -236,36 +233,27 @@ int main(int argc, char **argv) {
     if(!init_xenstore())
         goto done;
 
+    pthread_mutex_init(&mutex, NULL);
+    pthread_mutex_lock(&mutex);
+    pthread_create(&client, NULL, client_thread, NULL);
+
+    cmd = (char*)g_malloc0(snprintf(NULL, 0, "%s/%s", xs_input_path, reset) + 1);
+    sprintf(cmd, "%s/%s", xs_input_path, reset);
+
     th = xs_transaction_start(xs);
-    char *buf = xs_read(xs, th, xs_output_path, &len);
+    rc = xs_write(xs, th, cmd, reset, strlen(reset));
     xs_transaction_end(xs, th, false);
+    g_free(cmd);
 
-    if (!buf) {
-        pthread_mutex_init(&mutex, NULL);
-        pthread_mutex_lock(&mutex);
-        pthread_create(&client, NULL, client_thread, NULL);
-
-        th = xs_transaction_start(xs);
-        rc = xs_write(xs, th, xs_input_path, reset, strlen(reset));
-        xs_transaction_end(xs, th, false);
-
-        pthread_mutex_unlock(&mutex);
-
-        if (!rc) {
-            printf("Failed to send reset signal\n");
-            goto done;
-        }
-
-        pthread_join(client,NULL);
-
-    } else {
-        th = xs_transaction_start(xs);
-        xs_rm(xs, th, xs_output_path);
-        xs_transaction_end(xs, th, false);
-        received_reset_result(buf);
+    pthread_mutex_unlock(&mutex);
+    if (!rc) {
+        printf("Failed to send reset signal\n");
+        goto done;
     }
 
-    done:
+    pthread_join(client,NULL);
+
+done:
     interrupted = 1;
     pthread_mutex_destroy(&mutex);
     xs_close(xs);

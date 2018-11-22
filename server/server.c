@@ -119,14 +119,10 @@ static const char* xs_init_path = "/drakvuf-deployer/init";
 static const char* xs_input_path = "/drakvuf-deployer/input";
 static const char* xs_output_path = "/drakvuf-deployer/output";
 
-static const char* reset = "reset";
 static char* reset_script;
 
 /* Xenstore handle */
 static struct xs_handle *xs;
-
-/* The domain ID we are running in */
-static int my_domid;
 
 /* Interrupt handler */
 static int interrupted;
@@ -159,32 +155,37 @@ void server() {
             if (!vec || !num_strings) goto done;
 
             th = xs_transaction_start(xs);
-            buf = xs_read(xs, th, xs_input_path, &len);
+            buf = xs_read(xs, th, vec[XS_WATCH_PATH], &len);
             xs_transaction_end(xs, th, false);
 
-            if ( buf ) {
+            if ( buf && len ) {
 
-                printf("Received: %s\n", buf);
+                // DO RESET
+                char *cmd = (char*)g_malloc0(snprintf(NULL, 0, "%s %s", reset_script, buf) + 1);
+                sprintf(cmd, "%s %s", reset_script, buf);
+                printf("** RUNNING RESET: '%s'\n", cmd);
 
-                if(!strncmp(buf, reset, strlen(reset))) {
+                char *output = NULL;
+                g_spawn_command_line_sync(cmd, &output, NULL, NULL, NULL);
+                printf("** FINISHED RESET: '%s'\n", output);
+                g_free(cmd);
 
-                    // DO RESET
-                    printf("** RUNNING RESET: %s\n", reset_script);
-                    char *output;
-                    int exit_status;
-                    g_spawn_command_line_sync(reset_script, &output, NULL, &exit_status, NULL);
-                    printf("** FINISHED RESET: %s\n", output);
-
-                    th = xs_transaction_start(xs);
-	                rc = xs_write(xs, th, xs_output_path, output, strlen(output));
-                    xs_transaction_end(xs, th, false);
-                }
+                // WRITE OUTPUT
+                cmd = (char*)g_malloc0(snprintf(NULL, 0, "%s/%s", xs_output_path, buf) + 1);
+                sprintf(cmd, "%s/%s", xs_output_path, buf);
 
                 th = xs_transaction_start(xs);
-                rc = xs_rm(xs, th, xs_input_path);
+	            rc = xs_write(xs, th, cmd, output, strlen(output));
                 xs_transaction_end(xs, th, false);
 
+                g_free(cmd);
+                g_free(output);
                 free(buf);
+
+                // CLEANUP INPUT
+                th = xs_transaction_start(xs);
+                rc = xs_rm(xs, th, vec[XS_WATCH_PATH]);
+                xs_transaction_end(xs, th, false);
             }
         }
 	}
@@ -195,22 +196,28 @@ done:
 
 int init_xenstore() {
 
-    int rc = 0;
-	int size = 0;
+    int rc, size;
 	xs_transaction_t th;
+    struct xs_permissions perms[1];
+
+    perms[0].id = 0;
+    perms[0].perms = XS_PERM_READ|XS_PERM_WRITE;
 
 	xs = xs_open(0);
 	if (!xs) {
-		return rc;
+		return 0;
 	}
 
 	char* id = xs_read(xs, th, "domid", &size);
 	if (!id) {
 		printf("Failed to access xenstore\n");
-        return rc;
+        return 0;
 	}
 
-	my_domid = atoi(id);
+    if(atoi(id)) {
+        printf("Server needs to run in dom0\n");
+        return 0;
+    }
 
 	//Init Xenstore folder
     th = xs_transaction_start(xs);
@@ -222,42 +229,85 @@ int init_xenstore() {
         goto done;
 	}
 
-    rc = 1;
-	printf("My domain ID is %i\n", my_domid);
-
-    if(my_domid) {
-        printf("Server needs to run in dom0\n");
-        return rc;
-    }
-
-    struct xs_permissions perms[1];
-
-    perms[0].id = my_domid;
-    perms[0].perms = XS_PERM_READ|XS_PERM_WRITE;
-
-    th = xs_transaction_start(xs);
-    rc = xs_set_permissions(xs, th, xs_base_path, perms, 1);
-    xs_transaction_end(xs, th, false);
-
-    if (!rc) {
-        printf("Failed to set read/write permissions on %s\n", xs_base_path);
-        goto done;
-    }
-
     th = xs_transaction_start(xs);
     rc = xs_set_permissions(xs, th, xs_init_path, perms, 1);
     xs_transaction_end(xs, th, false);
 
-    if (!rc) {
-        printf("Failed to set read/write permissions on %s\n", xs_init_path);
+    if(!rc) {
+		printf("Failed to init Xenstore folder\n");
         goto done;
-    }
+	}
 
-    printf("Permissions set on %s\n", xs_base_path);
+    char *init = (char*)g_malloc0(snprintf(NULL, 0, "%s/%s", xs_input_path, id) + 1);
+    sprintf(init, "%s/%s", xs_input_path, id);
+
+    th = xs_transaction_start(xs);
+	rc = xs_write(xs, th, init, id, size);
+    xs_transaction_end(xs, th, false);
+
+    if(!rc) {
+		printf("Failed to init Xenstore folder\n");
+        goto done;
+	}
+
+    th = xs_transaction_start(xs);
+    rc = xs_set_permissions(xs, th, xs_input_path, perms, 1);
+    xs_transaction_end(xs, th, false);
+
+    if(!rc) {
+		printf("Failed to init Xenstore folder\n");
+        goto done;
+	}
+
+    th = xs_transaction_start(xs);
+    rc = xs_rm(xs, th, init);
+    xs_transaction_end(xs, th, false);
+
+    if(!rc) {
+		printf("Failed to init Xenstore folder\n");
+        goto done;
+	}
+
+    g_free(init);
+
+    init = (char*)g_malloc0(snprintf(NULL, 0, "%s/%s", xs_output_path, id) + 1);
+    sprintf(init, "%s/%s", xs_output_path, id);
+
+    th = xs_transaction_start(xs);
+	rc = xs_write(xs, th, init, id, size);
+    xs_transaction_end(xs, th, false);
+
+    if(!rc) {
+		printf("Failed to init Xenstore folder\n");
+        goto done;
+	}
+
+    th = xs_transaction_start(xs);
+    rc = xs_set_permissions(xs, th, xs_output_path, perms, 1);
+    xs_transaction_end(xs, th, false);
+
+    if(!rc) {
+		printf("Failed to init Xenstore folder\n");
+        goto done;
+	}
+
+    th = xs_transaction_start(xs);
+    rc = xs_rm(xs, th, init);
+    xs_transaction_end(xs, th, false);
+
+    if(!rc) {
+		printf("Failed to init Xenstore folder\n");
+        goto done;
+	}
 
 done:
+    g_free(init);
     free(id);
-    return 1;
+
+    if ( !rc )
+        xs_close(xs);
+
+    return rc;
 }
 
 void xenstore_close() {
@@ -277,7 +327,7 @@ int main(int argc, char **argv) {
 	int ret = 1;
 	interrupted = 0;
 
-    if (argc<2) {
+    if (argc != 2) {
         printf("%s <reset script>\n", argv[0]);
         goto done;
     }
